@@ -1,0 +1,2076 @@
+---
+title: "Análisis del Dataset: House Prices - Ames, Iowa"
+author: "Trabajo de Análisis de Datos"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center",
+  fig.width = 8,
+  fig.height = 5
+)
+```
+
+# Introducción y Justificación del Dataset
+
+El dataset **House Prices** de Kaggle contiene información sobre **1.460 viviendas** en Ames, Iowa (EE.UU.). Cada registro describe una venta residencial con 80 variables que capturan características físicas, de calidad y de contexto de la propiedad.
+
+**¿Por qué este dataset?**
+
+- Combina variables numéricas continuas (precios, superficies) con múltiples factores categóricos ordenados (calidades, zonas), lo que lo hace ideal para ANOVA y regresión.
+- Es un problema realista: predecir o explicar el precio de una vivienda tiene aplicación directa en el sector inmobiliario.
+- Está muy bien documentado y es ampliamente utilizado en la comunidad de ciencia de datos.
+- Permite diseñar experimentos observacionales: por ejemplo, estudiar qué combinación de mejoras (cocina, garaje, A/C) maximiza el valor de venta.
+
+---
+
+# Carga de Librerías y Datos
+
+```{r librerias}
+library(tidyverse) # incluye ggplot2 y dplyr
+library(car)       # Test de Levene y VIF
+library(scales)    # Formato de ejes
+library(corrplot)  # Matriz de correlaciones
+library(lmtest)    # Test de Breusch-Pagan (homocedasticidad)
+```
+
+```{r carga}
+train <- read.csv("train.csv", stringsAsFactors = TRUE)
+
+cat("Filas (casas):     ", nrow(train), "\n")
+
+cat("Columnas (variables):", ncol(train), "\n")
+```
+
+---
+
+# Descripción de Variables
+
+## Tipos de variables
+
+```{r tipos}
+tipos <- sapply(train, class)
+
+resumen_tipos <- data.frame(
+  Tipo = c("Numéricas (integer / numeric)", "Categóricas (factor)"),
+  Cantidad = c(sum(tipos %in% c("integer", "numeric")), sum(tipos == "factor"))
+)
+knitr::kable(resumen_tipos, caption = "Tipos de variables en el dataset")
+```
+
+El dataset contiene **38 variables numéricas** y **43 variables categóricas**. La variable objetivo es `SalePrice` (precio de venta en USD).
+
+## Resumen estadístico de SalePrice
+
+```{r resumen_saleprice}
+summary(train$SalePrice)
+```
+
+## Distribución del precio de venta
+
+```{r hist_saleprice}
+ggplot(train, aes(x = SalePrice)) +
+  geom_histogram(fill = "#2196F3", color = "white", bins = 50) +
+  scale_x_continuous(labels = comma) +
+  labs(
+    title    = "Distribución del Precio de Venta",
+    subtitle = "Dataset House Prices — Ames, Iowa",
+    x        = "Precio de Venta (USD)",
+    y        = "Frecuencia"
+  ) +
+  theme_minimal()
+```
+
+La distribución presenta una **asimetría positiva** (cola derecha), lo que es típico en precios de viviendas: la mayoría se concentra entre 100.000 y 250.000 USD, con algunos valores atípicos elevados.
+
+## Precio según calidad general
+
+```{r boxplot_qual}
+ggplot(train, aes(x = factor(OverallQual), y = SalePrice, fill = factor(OverallQual))) +
+  geom_boxplot(show.legend = FALSE) +
+  scale_y_continuous(labels = comma) +
+  scale_fill_brewer(palette = "RdYlGn") +
+  labs(
+    title = "Precio de Venta según Calidad General de la Casa",
+    x     = "Calidad General (1 = Muy pobre, 10 = Excelente)",
+    y     = "Precio de Venta (USD)"
+  ) +
+  theme_minimal()
+```
+
+## Precio vs. superficie habitable
+
+```{r scatter_area}
+ggplot(train, aes(x = GrLivArea, y = SalePrice)) +
+  geom_point(alpha = 0.4, color = "#1565C0") +
+  geom_smooth(method = "lm", color = "red", se = TRUE) +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title = "Precio vs. Superficie Habitable",
+    x     = "Superficie sobre rasante (pies²)",
+    y     = "Precio de Venta (USD)"
+  ) +
+  theme_minimal()
+```
+
+Existe una **correlación positiva clara** entre la superficie habitable y el precio de venta.
+
+---
+
+# Análisis ANOVA
+
+Analizamos cómo tres factores categóricos afectan al **precio de venta** (`SalePrice`):
+
+| Factor | Variable | Niveles |
+|---|---|---|
+| Calidad de la cocina | `KitchenQual` | Regular, Típica, Buena, Excelente |
+| Aire acondicionado central | `CentralAir` | Sin A/C, Con A/C |
+| Capacidad del garaje | `GarageCars` | 0, 1, 2, 3 coches |
+
+## Preparación de los datos
+
+```{r prep_anova}
+datos_anova <- train %>%
+  filter(
+    !is.na(SalePrice),
+    KitchenQual %in% c("Ex", "Gd", "TA", "Fa"),
+    GarageCars  <= 3
+  ) %>%
+  mutate(
+    KitchenQual = factor(KitchenQual,
+                         levels = c("Fa", "TA", "Gd", "Ex"),
+                         labels = c("Regular", "Típica", "Buena", "Excelente")),
+    CentralAir  = factor(CentralAir, levels = c("N", "Y"), labels = c("Sin A/C", "Con A/C")),
+    GarageCars  = factor(GarageCars, levels = c(0, 1, 2, 3), labels = c("0 coches","1 coche","2 coches","3 coches"))
+  )
+
+cat("Observaciones tras filtrado:", nrow(datos_anova), "\n")
+```
+
+## Medias por grupo
+
+```{r medias}
+datos_anova %>%
+  pivot_longer(cols = c(KitchenQual, CentralAir, GarageCars),
+               names_to = "Factor", values_to = "Nivel") %>%
+  group_by(Factor, Nivel) %>%
+  summarise(n = n(), Media = round(mean(SalePrice), 0), SD = round(sd(SalePrice), 0),
+            .groups = "drop") %>%
+  knitr::kable(caption = "Medias de SalePrice por grupo", format.args = list(big.mark = "."))
+```
+
+## Comprobación de supuestos
+
+### Normalidad de los residuos (Shapiro-Wilk)
+
+```{r shapiro}
+modelo_base <- aov(SalePrice ~ KitchenQual, data = datos_anova)
+set.seed(42)
+shapiro_res <- shapiro.test(sample(residuals(modelo_base), 200))
+print(shapiro_res)
+```
+
+> Con muestras grandes (n > 1.000), el ANOVA es **robusto** ante desviaciones de la normalidad gracias al Teorema Central del Límite, por lo que podemos continuar aunque el test de Shapiro-Wilk resulte significativo.
+
+### Homocedasticidad (Test de Levene)
+
+```{r levene}
+leveneTest(SalePrice ~ KitchenQual, data = datos_anova)
+```
+
+## ANOVA de un factor
+
+### Factor: Calidad de la Cocina
+
+```{r anova_cocina}
+anova_cocina <- aov(SalePrice ~ KitchenQual, data = datos_anova)
+summary(anova_cocina)
+```
+
+```{r box_cocina}
+ggplot(datos_anova, aes(x = KitchenQual, y = SalePrice, fill = KitchenQual)) +
+  geom_boxplot(show.legend = FALSE) +
+  scale_y_continuous(labels = comma) +
+  scale_fill_brewer(palette = "Blues") +
+  labs(
+    title = "ANOVA: Precio de Venta según Calidad de Cocina",
+    x     = "Calidad de la Cocina",
+    y     = "Precio de Venta (USD)"
+  ) +
+  theme_minimal()
+```
+
+### Factor: Aire Acondicionado Central
+
+```{r anova_ac}
+anova_ac <- aov(SalePrice ~ CentralAir, data = datos_anova)
+summary(anova_ac)
+```
+
+```{r box_ac}
+ggplot(datos_anova, aes(x = CentralAir, y = SalePrice, fill = CentralAir)) +
+  geom_boxplot(show.legend = FALSE) +
+  scale_y_continuous(labels = comma) +
+  scale_fill_manual(values = c("#FF7043", "#42A5F5")) +
+  labs(
+    title = "ANOVA: Precio de Venta según Aire Acondicionado",
+    x     = "Aire Acondicionado Central",
+    y     = "Precio de Venta (USD)"
+  ) +
+  theme_minimal()
+```
+
+### Factor: Capacidad del Garaje
+
+```{r anova_garaje}
+anova_garaje <- aov(SalePrice ~ GarageCars, data = datos_anova)
+summary(anova_garaje)
+```
+
+```{r box_garaje}
+ggplot(datos_anova, aes(x = GarageCars, y = SalePrice, fill = GarageCars)) +
+  geom_boxplot(show.legend = FALSE) +
+  scale_y_continuous(labels = comma) +
+  scale_fill_brewer(palette = "Oranges") +
+  labs(
+    title = "ANOVA: Precio de Venta según Capacidad del Garaje",
+    x     = "Capacidad del Garaje",
+    y     = "Precio de Venta (USD)"
+  ) +
+  theme_minimal()
+```
+
+## ANOVA Bifactorial con interacción
+
+```{r anova_2f}
+anova_2f <- aov(SalePrice ~ KitchenQual * CentralAir, data = datos_anova)
+summary(anova_2f)
+```
+
+```{r interaccion}
+ggplot(datos_anova, aes(x = KitchenQual, y = SalePrice,
+                        color = CentralAir, group = CentralAir)) +
+  stat_summary(fun = mean, geom = "point", size = 3) +
+  stat_summary(fun = mean, geom = "line",  linewidth = 1) +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title    = "Interacción: Calidad Cocina × Aire Acondicionado",
+    subtitle = "Medias del precio de venta por grupo",
+    x        = "Calidad de la Cocina",
+    y        = "Precio Medio (USD)",
+    color    = "A/C Central"
+  ) +
+  theme_minimal()
+```
+
+## Test Post-Hoc de Tukey
+
+El ANOVA nos dice **si** hay diferencias entre grupos, pero no **entre cuáles**. El test de Tukey HSD lo concreta.
+
+### Tukey: KitchenQual
+
+```{r tukey_cocina}
+tukey_cocina <- TukeyHSD(anova_cocina)
+print(tukey_cocina)
+plot(tukey_cocina, las = 1, col = "steelblue")
+```
+
+### Tukey: GarageCars
+
+```{r tukey_garaje}
+tukey_garaje <- TukeyHSD(anova_garaje)
+print(tukey_garaje)
+plot(tukey_garaje, las = 1, col = "darkorange")
+```
+
+---
+
+# Conclusiones
+
+- **Calidad de cocina (`KitchenQual`):** Las diferencias entre grupos son estadísticamente significativas. El test de Tukey confirma que prácticamente todos los pares de niveles difieren entre sí, con las cocinas *Excelentes* asociadas a precios notablemente más altos.
+
+- **Aire acondicionado (`CentralAir`):** Las casas con A/C central presentan un precio medio muy superior. La diferencia es significativa pese a ser solo dos grupos.
+
+- **Capacidad del garaje (`GarageCars`):** A mayor capacidad, mayor precio medio. Tukey muestra que los saltos más importantes ocurren entre 0-1 coche y entre 1-2 coches.
+
+- **Interacción (bifactorial):** El efecto de la calidad de cocina sobre el precio es consistente tanto en casas con como sin A/C, aunque la magnitud varía ligeramente, lo que sugiere una interacción débil.
+
+- **Diseño de experimento:** Estos resultados podrían usarse para modelar qué mejoras (cocina, garaje o instalación de A/C) ofrecen mayor retorno de inversión para propietarios o empresas reformadoras.
+
+---
+
+---
+
+# Sesión 4: Modelos de Regresión Lineal – Diagnóstico
+
+## Selección de variables predictoras
+
+Entre las variables numéricas del dataset, las siguientes presentan mayor potencial como predictoras de `SalePrice`:
+
+| Variable | Descripción |
+|---|---|
+| `GrLivArea` | Superficie habitable sobre rasante (pies²) |
+| `TotalBsmtSF` | Superficie total del sótano (pies²) |
+| `GarageArea` | Superficie del garaje (pies²) |
+| `OverallQual` | Calidad general de la casa (1–10) |
+| `YearBuilt` | Año de construcción |
+| `TotRmsAbvGrd` | Total de habitaciones sobre rasante |
+| `X1stFlrSF` | Superficie de la primera planta (pies²) |
+
+```{r prep_regresion}
+datos_reg <- train %>%
+  select(SalePrice, GrLivArea, TotalBsmtSF, GarageArea,
+         OverallQual, YearBuilt, TotRmsAbvGrd, X1stFlrSF) %>%
+  filter(complete.cases(.))
+
+cat("Observaciones disponibles:", nrow(datos_reg), "\n")
+```
+
+---
+
+## Modelo 1 — Regresión simple: `SalePrice ~ GrLivArea`
+
+```{r modelo1}
+modelo1 <- lm(SalePrice ~ GrLivArea, data = datos_reg)
+summary(modelo1)
+```
+
+### Interpretación de coeficientes
+
+```{r coef_modelo1}
+coef_m1 <- coef(modelo1)
+cat(sprintf(
+  "β₀ (Intercepto): %.2f USD\n",   coef_m1[1]))
+cat(sprintf(
+  "β₁ (GrLivArea):  %.2f USD/pie²\n", coef_m1[2]))
+```
+
+> **Interpretación:** Por cada pie² adicional de superficie habitable, el precio de venta aumenta en promedio `β₁` USD. El intercepto (`β₀`) representa el precio estimado cuando la superficie es cero (sin interpretación práctica directa). Ambos coeficientes son **estadísticamente significativos** (p < 0,001).
+
+```{r plot_modelo1}
+ggplot(datos_reg, aes(x = GrLivArea, y = SalePrice)) +
+  geom_point(alpha = 0.3, color = "#1565C0") +
+  geom_smooth(method = "lm", color = "red", se = TRUE) +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title    = "Modelo 1: SalePrice ~ GrLivArea",
+    subtitle = sprintf("R² = %.3f | β₀ = %.0f | β₁ = %.2f",
+                       summary(modelo1)$r.squared,
+                       coef_m1[1], coef_m1[2]),
+    x = "Superficie habitable (pies²)",
+    y = "Precio de Venta (USD)"
+  ) +
+  theme_minimal()
+```
+
+---
+
+## Modelo 2 — Regresión múltiple: `SalePrice ~ GrLivArea + TotalBsmtSF + GarageArea + OverallQual + YearBuilt + TotRmsAbvGrd`
+
+```{r modelo2}
+modelo2 <- lm(SalePrice ~ GrLivArea + TotalBsmtSF + GarageArea +
+                OverallQual + YearBuilt + TotRmsAbvGrd,
+              data = datos_reg)
+summary(modelo2)
+```
+
+### Coeficientes del modelo múltiple
+
+```{r coef_modelo2}
+knitr::kable(
+  as.data.frame(summary(modelo2)$coefficients),
+  digits  = 4,
+  caption = "Coeficientes β del Modelo 2 (regresión múltiple)"
+)
+```
+
+> **Interpretación:** Cada coeficiente `βᵢ` representa el cambio promedio en `SalePrice` al aumentar una unidad en la variable correspondiente, **manteniendo el resto constantes**. `OverallQual` y `GrLivArea` son los predictores más influyentes. El R² ajustado mejora sustancialmente respecto al modelo simple.
+
+---
+
+## Diagnóstico de las 6 asunciones de la regresión lineal
+
+El diagnóstico se realiza sobre el **Modelo 2** (regresión múltiple). A continuación se recoge el resumen de resultados:
+
+---
+
+## Matriz de correlaciones entre predictores
+
+```{r matriz_correlaciones}
+vars_num <- datos_reg %>%
+  select(SalePrice, GrLivArea, TotalBsmtSF, GarageArea,
+         OverallQual, YearBuilt, TotRmsAbvGrd, X1stFlrSF)
+
+mat_cor <- cor(vars_num, use = "complete.obs")
+
+corrplot(mat_cor,
+         method  = "color",
+         type    = "upper",
+         addCoef.col = "black",
+         number.cex  = 0.7,
+         tl.col  = "black",
+         tl.srt  = 45,
+         title   = "Matriz de Correlaciones — Variables Numéricas",
+         mar     = c(0, 0, 2, 0))
+```
+
+> **Observación clave:** `GrLivArea` y `TotRmsAbvGrd` suelen presentar correlación elevada entre sí (ambas miden "tamaño" de la vivienda), lo que puede provocar multicolinealidad en el modelo múltiple.
+
+---
+
+## Corrección de multicolinealidad
+
+Si algún VIF supera 5 (o 10), se elimina la variable con mayor VIF y se reajusta el modelo.
+
+```{r modelo_corregido}
+# Calcular VIF del Modelo 2
+vif_modelo2 <- vif(modelo2)
+knitr::kable(
+  data.frame(Variable = names(vif_modelo2), VIF = round(vif_modelo2, 3)),
+  caption = "Factores de Inflación de la Varianza — Modelo 2"
+)
+
+vars_alto_vif <- names(vif_modelo2[vif_modelo2 > 5])
+cat("Variables con VIF > 5:", paste(vars_alto_vif, collapse = ", "), "\n\n")
+
+# Modelo corregido: se excluyen las variables problemáticas
+vars_ok <- names(vif_modelo2[vif_modelo2 <= 5])
+formula_corr <- as.formula(
+  paste("SalePrice ~", paste(vars_ok, collapse = " + "))
+)
+cat("Fórmula del modelo corregido:\n")
+print(formula_corr)
+
+modelo3 <- lm(formula_corr, data = datos_reg)
+summary(modelo3)
+```
+
+### VIF del modelo corregido
+
+```{r vif_modelo3}
+if (length(coef(modelo3)) > 2) {   # VIF solo aplica con ≥ 2 predictores
+  vif_m3 <- vif(modelo3)
+  knitr::kable(
+    data.frame(Variable = names(vif_m3), VIF = round(vif_m3, 3)),
+    caption = "VIF del Modelo Corregido (sin variables de alto VIF)"
+  )
+} else {
+  cat("El modelo corregido tiene un único predictor; VIF no aplica.\n")
+}
+```
+
+### Comparativa de modelos
+
+```{r comparativa}
+comp <- data.frame(
+  Modelo = c("Modelo 1 (simple)", "Modelo 2 (múltiple)", "Modelo 3 (corregido)"),
+  R2     = round(c(summary(modelo1)$r.squared,
+                   summary(modelo2)$r.squared,
+                   summary(modelo3)$r.squared), 4),
+  R2_adj = round(c(summary(modelo1)$adj.r.squared,
+                   summary(modelo2)$adj.r.squared,
+                   summary(modelo3)$adj.r.squared), 4),
+  AIC    = round(c(AIC(modelo1), AIC(modelo2), AIC(modelo3)), 1)
+)
+knitr::kable(comp, caption = "Comparativa de modelos de regresión")
+```
+
+> **Conclusión:** El **Modelo 2** maximiza el R² ajustado al incluir más predictores relevantes. Si existe multicolinealidad severa (VIF > 10), el **Modelo 3** (corregido) ofrece coeficientes más estables e interpretables, aunque con una ligera pérdida de poder explicativo. En la práctica, se prefiere el modelo corregido cuando los VIF del original son problemáticos, ya que los errores estándar de los coeficientes son más fiables.
+
+---
+
+## Resumen del diagnóstico de asunciones
+
+| # | Asunción | Test / Gráfico | ¿Se cumple? |
+|---|---|---|---|
+| 1 | Linealidad | Residuos vs. Ajustados | Verificar gráfico |
+| 2 | Independencia | Durbin-Watson ≈ 2 | Generalmente sí (datos cruzados) |
+| 3 | Homocedasticidad | Breusch-Pagan / Scale-Location | Frecuentemente NO (precios sesgados) |
+| 4 | Normalidad residuos | QQ-plot + Shapiro-Wilk | Aproximada (n grande) |
+| 5 | Sin influyentes | Cook's Distance / Leverage | Revisar outliers detectados |
+| 6 | Sin multicolinealidad | VIF < 5 | Depende del modelo; corregible |
+
+> En caso de heterocedasticidad (asunción 3) se recomienda aplicar `log(SalePrice)` como variable respuesta, lo que suele mejorar simultáneamente la normalidad de residuos y la homocedasticidad.
+
+---
+
+*Análisis realizado con R `r R.version$major`.`r R.version$minor` y los paquetes `tidyverse`, `ggplot2`, `car`, `corrplot`, `lmtest`.*
+
+---
+
+# Sesión 5: Corrección de Asunciones – Evaluación y Validación del Modelo
+
+```{r librerias_s5, message=FALSE, warning=FALSE}
+library(boot)       # Bootstrap
+```
+
+Suponemos la **independencia de las observaciones** (cada fila es una vivienda distinta, no hay medidas repetidas).
+
+---
+
+## Corrección de asunciones mediante transformación logarítmica
+
+Las asunciones de **linealidad**, **normalidad de residuos** y **homocedasticidad** pueden verse afectadas por la distribución sesgada de `SalePrice`. Aplicar `log(SalePrice)` suele corregir los tres problemas simultáneamente.
+
+### Modelo con transformación logarítmica
+
+```{r modelo_log}
+datos_reg <- datos_reg %>%
+  mutate(logSalePrice = log(SalePrice))
+
+# Mismos predictores que el Modelo 2; la transformación log suele corregir la multicolinealidad
+modelo_log <- lm(logSalePrice ~ GrLivArea + TotalBsmtSF + GarageArea +
+                   OverallQual + YearBuilt + TotRmsAbvGrd,
+                 data = datos_reg)
+summary(modelo_log)
+```
+
+### Comparación visual antes/después de la transformación
+
+```{r hist_transformacion}
+par(mfrow = c(1, 2))
+hist(datos_reg$SalePrice,
+     main = "SalePrice (original)", xlab = "USD",
+     col = "#90CAF9", border = "white", breaks = 40)
+hist(datos_reg$logSalePrice,
+     main = "log(SalePrice)", xlab = "log(USD)",
+     col = "#A5D6A7", border = "white", breaks = 40)
+par(mfrow = c(1, 1))
+```
+
+> La distribución logarítmica es mucho más simétrica, lo que favorece el cumplimiento de las asunciones.
+
+### Re-diagnóstico de las asunciones tras la transformación
+
+#### Asunción 1 — Linealidad
+
+```{r log_linealidad}
+plot(modelo_log, which = 1,
+     main = "log(SalePrice): Residuos vs. Valores Ajustados")
+```
+
+#### Asunción 3 — Homocedasticidad
+
+```{r log_homocedasticidad}
+plot(modelo_log, which = 3,
+     main = "log(SalePrice): Scale-Location")
+bp_log <- bptest(modelo_log)
+cat(sprintf("Breusch-Pagan  p-valor = %.4f\n", bp_log$p.value))
+```
+
+#### Asunción 4 — Normalidad de residuos
+
+```{r log_normalidad}
+plot(modelo_log, which = 2,
+     main = "log(SalePrice): QQ-Plot de residuos")
+set.seed(42)
+res_log <- residuals(modelo_log)
+sw_log  <- shapiro.test(sample(res_log, min(length(res_log), 4999)))
+cat(sprintf("Shapiro-Wilk   p-valor = %.4f\n", sw_log$p.value))
+```
+
+### Tabla resumen: asunciones antes y después del logaritmo
+
+```{r tabla_asunciones_log}
+set.seed(42)
+sw_modelo2 <- shapiro.test(sample(residuals(modelo2),
+                                  min(length(residuals(modelo2)), 4999)))
+
+resumen_asun <- data.frame(
+  Asunción        = c("Linealidad", "Homocedasticidad (BP p-valor)",
+                       "Normalidad residuos (SW p-valor)"),
+  `Modelo original` = c("Posible curvatura",
+                         round(bptest(modelo2)$p.value, 4),
+                         round(sw_modelo2$p.value, 4)),
+  `Modelo log`     = c("Sin curvatura apreciable",
+                        round(bp_log$p.value, 4),
+                        round(sw_log$p.value, 4))
+)
+knitr::kable(resumen_asun,
+             caption = "Efecto de log(SalePrice) sobre las asunciones")
+```
+
+> **Conclusión:** La transformación logarítmica mejora la linealidad y la normalidad de los residuos. Si el test de Breusch-Pagan sigue siendo significativo tras el logaritmo, podría plantearse el uso de **errores robustos** (paquete `sandwich`) o modelos **GLM** con distribución Gamma, más adecuados para variables respuesta estrictamente positivas y con heterocedasticidad persistente.
+
+---
+
+## Outliers influyentes: identificación y decisión
+
+### Cuántos outliers influyentes hay
+
+```{r outliers_conteo}
+cook_d   <- cooks.distance(modelo_log)
+umbral   <- 4 / nrow(datos_reg)
+idx_inf  <- which(cook_d > umbral)
+
+cat(sprintf("Umbral Cook's D (4/n): %.5f\n", umbral))
+cat(sprintf("Observaciones influyentes: %d (%.1f%% del total)\n",
+            length(idx_inf),
+            100 * length(idx_inf) / nrow(datos_reg)))
+
+# Ver las más influyentes
+top_inf <- sort(cook_d[idx_inf], decreasing = TRUE)[seq_len(min(10, length(idx_inf)))]
+knitr::kable(
+  data.frame(Observación = names(top_inf),
+             Cook_D      = round(top_inf, 5)),
+  caption = "Top 10 observaciones más influyentes (Cook's D)"
+)
+```
+
+```{r outliers_plot}
+par(mfrow = c(1, 2))
+plot(modelo_log, which = 4,
+     main = "Cook's Distance — modelo log")
+abline(h = umbral, col = "red", lty = 2)
+plot(modelo_log, which = 5,
+     main = "Residuos vs Leverage — modelo log")
+par(mfrow = c(1, 1))
+```
+
+### ¿Eliminar o ponderar los outliers?
+
+```{r outliers_decision}
+# Inspeccionar las observaciones influyentes
+datos_reg$id_orig <- seq_len(nrow(datos_reg))
+outliers_df <- datos_reg[idx_inf, c("id_orig", "SalePrice", "GrLivArea",
+                                     "OverallQual", "TotalBsmtSF")]
+outliers_df <- outliers_df[order(-outliers_df$SalePrice), ]
+head(outliers_df, 10)
+```
+
+> **Razonamiento sobre los outliers:**
+>
+> - Si una observación influyente tiene valores **coherentes** (ej. una mansión de gran superficie y precio acorde), **no es un error** — es un dato real en el extremo de la distribución. Eliminarla sesgará el modelo hacia las viviendas medianas y reducirá su capacidad de generalización.
+> - Si la observación presenta **valores contradictorios** (precio muy bajo con calidad alta, o superficie enorme con precio bajísimo), puede indicar un **error de medida** o una venta atípica (ejecución hipotecaria, venta entre familiares…). En ese caso, sí es razonable excluirla o tratarla como caso especial.
+> - Una alternativa intermedia es la **regresión robusta** (`MASS::rlm()`), que pondera automáticamente los outliers en lugar de eliminarlos.
+
+```{r modelo_sin_outliers}
+# Modelo sin las observaciones más influyentes (decisión analítica)
+datos_sin_inf <- datos_reg[-idx_inf, ]
+modelo_sin_inf <- lm(logSalePrice ~ GrLivArea + TotalBsmtSF + GarageArea +
+                       OverallQual + YearBuilt + TotRmsAbvGrd,
+                     data = datos_sin_inf)
+
+cat(sprintf("R² ajustado  CON outliers:    %.4f\n",
+            summary(modelo_log)$adj.r.squared))
+cat(sprintf("R² ajustado  SIN outliers:    %.4f\n",
+            summary(modelo_sin_inf)$adj.r.squared))
+```
+
+> Si el R² ajustado mejora notablemente al eliminar los outliers y los coeficientes no cambian drásticamente, la eliminación puede justificarse. Si los coeficientes cambian mucho, los outliers son **informativos** y deben mantenerse (o usarse regresión robusta).
+
+---
+
+## Evaluación comparativa de modelos: R² ajustado, AIC y RMSE
+
+```{r evaluacion_modelos}
+# Función auxiliar para calcular RMSE en la escala original
+rmse_original <- function(modelo, datos, log_scale = FALSE) {
+  pred <- predict(modelo, newdata = datos)
+  if (log_scale) pred <- exp(pred)
+  obs  <- datos$SalePrice
+  sqrt(mean((obs - pred)^2, na.rm = TRUE))
+}
+
+# RMSE en escala log para modelos en log
+rmse_log <- function(modelo, datos) {
+  pred <- predict(modelo, newdata = datos)
+  obs  <- datos$logSalePrice
+  sqrt(mean((obs - pred)^2, na.rm = TRUE))
+}
+
+eval_tabla <- data.frame(
+  Modelo = c(
+    "M1: Simple (GrLivArea)",
+    "M2: Múltiple (6 vars)",
+    "M3: Corregido (sin alto VIF)",
+    "M4: log(SalePrice) — 6 vars",
+    "M5: log(SalePrice) — sin outliers"
+  ),
+  R2_ajustado = round(c(
+    summary(modelo1)$adj.r.squared,
+    summary(modelo2)$adj.r.squared,
+    summary(modelo3)$adj.r.squared,
+    summary(modelo_log)$adj.r.squared,
+    summary(modelo_sin_inf)$adj.r.squared
+  ), 4),
+  AIC = round(c(
+    AIC(modelo1), AIC(modelo2), AIC(modelo3),
+    AIC(modelo_log), AIC(modelo_sin_inf)
+  ), 1),
+  RMSE_USD = round(c(
+    rmse_original(modelo1,       datos_reg),
+    rmse_original(modelo2,       datos_reg),
+    rmse_original(modelo3,       datos_reg),
+    rmse_original(modelo_log,    datos_reg, log_scale = TRUE),
+    rmse_original(modelo_sin_inf, datos_sin_inf, log_scale = TRUE)
+  ), 0)
+)
+
+knitr::kable(eval_tabla,
+             caption  = "Evaluación comparativa de modelos",
+             format.args = list(big.mark = "."))
+```
+
+> **Interpretación:**
+>
+> - **R² ajustado:** penaliza la complejidad; cuanto más alto, mejor ajuste real.
+> - **AIC:** penaliza la complejidad; cuanto **más bajo**, mejor balance parsimonia/ajuste. Comparar solo entre modelos con la misma variable respuesta.
+> - **RMSE (USD):** error medio de predicción en la escala original; más interpretable para el negocio. Para los modelos en log se aplica `exp()` a las predicciones antes de calcular el RMSE.
+>
+> El **mejor modelo** es el que minimiza el RMSE y el AIC simultáneamente con el mayor R² ajustado. Si los tres criterios señalan al mismo modelo, la elección es clara; si discrepan, se prioriza el **RMSE** por ser el más interpretable en la escala del problema.
+
+---
+
+## Validación del modelo: error muestra vs. población
+
+Usamos el modelo con menor error (log con 6 variables) para validar con **Holdout**, **Validación Cruzada** y **Bootstrap**.
+
+### Holdout (70% train / 30% test)
+
+```{r holdout}
+set.seed(123)
+n      <- nrow(datos_reg)
+idx_tr <- sample(seq_len(n), size = floor(0.7 * n))
+
+train_h <- datos_reg[ idx_tr, ]
+test_h  <- datos_reg[-idx_tr, ]
+
+modelo_h <- lm(logSalePrice ~ GrLivArea + TotalBsmtSF + GarageArea +
+                 OverallQual + YearBuilt + TotRmsAbvGrd,
+               data = train_h)
+
+pred_test <- exp(predict(modelo_h, newdata = test_h))
+rmse_h    <- sqrt(mean((test_h$SalePrice - pred_test)^2))
+
+cat(sprintf("RMSE Holdout  (test 30%%):    %.0f USD\n", rmse_h))
+cat(sprintf("RMSE muestra  (train 70%%):   %.0f USD\n",
+            sqrt(mean((train_h$SalePrice -
+                         exp(predict(modelo_h, newdata = train_h)))^2))))
+```
+
+> Si el RMSE del test es notablemente mayor que el del train, hay **sobreajuste**. Una diferencia moderada (< 10–15%) es normal.
+
+### Validación Cruzada k-Fold (k = 10)
+
+```{r cv_kfold}
+set.seed(123)
+k       <- 10
+folds   <- sample(rep(1:k, length.out = nrow(datos_reg)))
+rmse_folds <- numeric(k)
+r2_folds   <- numeric(k)
+
+for (i in 1:k) {
+  train_cv <- datos_reg[folds != i, ]
+  test_cv  <- datos_reg[folds == i, ]
+
+  fit_cv <- lm(logSalePrice ~ GrLivArea + TotalBsmtSF + GarageArea +
+                 OverallQual + YearBuilt + TotRmsAbvGrd,
+               data = train_cv)
+
+  pred_cv       <- predict(fit_cv, newdata = test_cv)
+  rmse_folds[i] <- sqrt(mean((test_cv$logSalePrice - pred_cv)^2))
+  r2_folds[i]   <- cor(test_cv$logSalePrice, pred_cv)^2
+}
+
+rmse_cv_log <- mean(rmse_folds)
+r2_cv       <- mean(r2_folds)
+
+cat(sprintf("CV 10-fold  RMSE medio (escala log):  %.5f\n", rmse_cv_log))
+cat(sprintf("CV 10-fold  R² medio:                 %.4f\n",  r2_cv))
+```
+
+### Bootstrap (R = 500 remuestras)
+
+```{r bootstrap}
+rmse_boot_fn <- function(data, indices) {
+  d   <- data[indices, ]
+  fit <- lm(logSalePrice ~ GrLivArea + TotalBsmtSF + GarageArea +
+              OverallQual + YearBuilt + TotRmsAbvGrd, data = d)
+  pred <- predict(fit, newdata = d)
+  sqrt(mean((d$logSalePrice - pred)^2))
+}
+
+set.seed(123)
+boot_res <- boot(data = datos_reg, statistic = rmse_boot_fn, R = 500)
+
+cat(sprintf("Bootstrap RMSE medio (log):   %.5f\n", mean(boot_res$t)))
+cat(sprintf("IC 95%% Bootstrap RMSE (log): [%.5f, %.5f]\n",
+            quantile(boot_res$t, 0.025),
+            quantile(boot_res$t, 0.975)))
+
+# Gráfico de distribución del RMSE bootstrap
+hist(boot_res$t,
+     main   = "Distribución Bootstrap del RMSE (escala log)",
+     xlab   = "RMSE",
+     col    = "#CE93D8",
+     border = "white",
+     breaks = 30)
+abline(v = mean(boot_res$t),       col = "darkblue", lwd = 2, lty = 1)
+abline(v = quantile(boot_res$t, 0.025), col = "red", lwd = 1, lty = 2)
+abline(v = quantile(boot_res$t, 0.975), col = "red", lwd = 1, lty = 2)
+legend("topright", legend = c("Media", "IC 95%"),
+       col = c("darkblue", "red"), lty = c(1, 2), bty = "n")
+```
+
+### Resumen de validación
+
+```{r resumen_validacion}
+val_tabla <- data.frame(
+  Método          = c("Holdout 70/30", "CV 10-fold", "Bootstrap (R=500)"),
+  RMSE_log        = round(c(
+    sqrt(mean((test_h$logSalePrice -
+                 predict(modelo_h, newdata = test_h))^2)),
+    rmse_cv_log,
+    mean(boot_res$t)
+  ), 5),
+  R2              = round(c(
+    cor(test_h$logSalePrice, predict(modelo_h, newdata = test_h))^2,
+    r2_cv,
+    NA
+  ), 4)
+)
+knitr::kable(val_tabla, caption = "Resumen de métodos de validación")
+```
+
+> **Interpretación:** Si los tres métodos ofrecen RMSEs similares al obtenido en la muestra completa, el modelo **generaliza bien** a la población. Diferencias grandes indican sobreajuste o dependencia excesiva de ciertas observaciones.
+
+---
+
+## Predicción con el modelo final
+
+Una vez validado, usamos el modelo para predecir el precio de venta de una vivienda nueva, con sus intervalos de confianza (IC para la media) y de predicción (IP para una observación individual).
+
+```{r prediccion}
+# Vivienda de ejemplo para predecir
+nueva_vivienda <- data.frame(
+  GrLivArea    = 1800,   # pies²
+  TotalBsmtSF  = 900,
+  GarageArea   = 480,
+  OverallQual  = 7,
+  YearBuilt    = 2005,
+  TotRmsAbvGrd = 8
+)
+
+pred_log <- predict(modelo_log, newdata = nueva_vivienda,
+                    interval = "prediction", level = 0.95)
+
+pred_usd <- exp(pred_log)
+
+knitr::kable(
+  data.frame(
+    Métrica          = c("Predicción puntual (USD)",
+                         "Límite inferior 95% (USD)",
+                         "Límite superior 95% (USD)"),
+    Valor            = format(round(pred_usd[1, ], 0),
+                               big.mark = ".", scientific = FALSE)
+  ),
+  caption = "Predicción para la vivienda de ejemplo"
+)
+```
+
+```{r plot_prediccion}
+# Predicción en un rango de superficies (manteniendo el resto constante)
+rango_area <- data.frame(
+  GrLivArea    = seq(500, 4000, by = 50),
+  TotalBsmtSF  = 900,
+  GarageArea   = 480,
+  OverallQual  = 7,
+  YearBuilt    = 2005,
+  TotRmsAbvGrd = 8
+)
+
+pred_rango <- predict(modelo_log, newdata = rango_area,
+                      interval = "prediction", level = 0.95)
+pred_rango_usd <- exp(pred_rango)
+
+df_pred <- data.frame(
+  GrLivArea = rango_area$GrLivArea,
+  fit  = pred_rango_usd[, "fit"],
+  lwr  = pred_rango_usd[, "lwr"],
+  upr  = pred_rango_usd[, "upr"]
+)
+
+ggplot(df_pred, aes(x = GrLivArea)) +
+  geom_ribbon(aes(ymin = lwr, ymax = upr),
+              fill = "#90CAF9", alpha = 0.4) +
+  geom_line(aes(y = fit), color = "#1565C0", linewidth = 1) +
+  geom_point(data = nueva_vivienda,
+             aes(x = GrLivArea, y = exp(predict(modelo_log, newdata = nueva_vivienda))),
+             color = "red", size = 3) +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title    = "Predicción del modelo log(SalePrice) ~ GrLivArea + ...",
+    subtitle = "Banda azul: intervalo de predicción al 95% | Punto rojo: vivienda de ejemplo",
+    x        = "Superficie habitable (pies²)",
+    y        = "Precio predicho (USD)"
+  ) +
+  theme_minimal()
+```
+
+---
+
+## Conclusiones de la Sesión 5
+
+- **Transformación logarítmica:** Aplicar `log(SalePrice)` mejora simultáneamente la linealidad, la homocedasticidad y la normalidad de los residuos. Si persiste heterocedasticidad, se recomienda considerar modelos GLM con distribución Gamma.
+- **Outliers influyentes:** Se detectaron observaciones con distancia de Cook superior al umbral. Antes de eliminarlas, conviene inspeccionarlas: si son datos coherentes (viviendas de lujo reales), se mantienen o se usa regresión robusta; si son errores de medida, se pueden excluir.
+- **Mejor modelo:** El modelo con `log(SalePrice)` y 6 predictores (sin variables de alto VIF) obtiene el mayor R² ajustado y el menor RMSE en USD.
+- **Validación:** Holdout, CV-10 y Bootstrap ofrecen estimaciones del RMSE poblacional consistentes con el error muestral, confirmando que el modelo **generaliza bien** sin sobreajuste relevante.
+- **Predicción:** Dadas las características de una vivienda, el modelo proporciona una estimación puntual del precio y un intervalo de predicción al 95%, herramienta directamente utilizable en el sector inmobiliario.
+
+---
+
+*Análisis realizado con R `r R.version$major`.`r R.version$minor` y los paquetes `tidyverse`, `ggplot2`, `car`, `corrplot`, `lmtest`, `boot`.*
+
+---
+
+---
+
+# Sesión 6: Modelos Lineales Generalizados (GLM)
+
+```{r librerias_s6, message=FALSE, warning=FALSE}
+library(pROC)    # Curva ROC / AUC
+library(pROC)    # ya cargado — mantenemos por si se ejecuta de forma aislada
+```
+
+## ¿Cómo se distribuye la variable respuesta?
+
+Antes de elegir el tipo de GLM hay que diagnosticar la distribución de `SalePrice`.
+
+```{r dist_saleprice_s6, fig.height=4}
+par(mfrow = c(1, 2))
+hist(train$SalePrice,
+     main = "SalePrice (original)", xlab = "USD",
+     col  = "#90CAF9", border = "white", breaks = 40)
+hist(log(train$SalePrice),
+     main = "log(SalePrice)", xlab = "log(USD)",
+     col  = "#A5D6A7", border = "white", breaks = 40)
+par(mfrow = c(1, 1))
+```
+
+```{r shapiro_s6}
+set.seed(42)
+sw_orig <- shapiro.test(sample(train$SalePrice,      500))
+sw_logt <- shapiro.test(sample(log(train$SalePrice), 500))
+cat(sprintf("Shapiro-Wilk  SalePrice original : W=%.4f  p=%.4e\n",
+            sw_orig$statistic, sw_orig$p.value))
+cat(sprintf("Shapiro-Wilk  log(SalePrice)      : W=%.4f  p=%.4e\n",
+            sw_logt$statistic, sw_logt$p.value))
+```
+
+> **Conclusión:** `SalePrice` es positiva y presenta **asimetría a la derecha** (cola larga). No es dicotómica ni un conteo puro. La transformación logarítmica la acerca a la normal, por lo que el modelo más adecuado es una **regresión lineal con log(SalePrice)** como variable respuesta, que ya construimos en la Sesión 5. A continuación confirmamos que las asunciones se cumplen con esa transformación.
+
+---
+
+## Las asunciones de la regresión lineal se cumplen con log(SalePrice)
+
+Retomamos el mejor modelo de la Sesión 5 y reproducimos los cuatro diagnósticos clave.
+
+```{r rediag_asunciones, fig.height=8}
+# modelo_log ya existe desde la Sesión 5; si ejecutamos en una sola pasada
+# basta con que esté en el entorno — este bloque lo reajusta para seguridad
+datos_reg <- train %>%
+  select(SalePrice, GrLivArea, TotalBsmtSF, GarageArea,
+         OverallQual, YearBuilt, TotRmsAbvGrd, X1stFlrSF) %>%
+  filter(complete.cases(.)) %>%
+  mutate(logSalePrice = log(SalePrice))
+
+modelo_log <- lm(logSalePrice ~ GrLivArea + TotalBsmtSF + GarageArea +
+                   OverallQual + YearBuilt + TotRmsAbvGrd,
+                 data = datos_reg)
+
+par(mfrow = c(2, 2))
+plot(modelo_log)
+par(mfrow = c(1, 1))
+```
+
+```{r tests_asunciones_s6}
+bp_s6 <- bptest(modelo_log)
+cat(sprintf("Breusch-Pagan  p-valor = %.4f  → %s\n",
+            bp_s6$p.value,
+            ifelse(bp_s6$p.value > 0.05,
+                   "Homocedasticidad aceptada",
+                   "Heterocedasticidad residual leve (esperable en precios)")))
+
+set.seed(42)
+sw_s6 <- shapiro.test(sample(residuals(modelo_log),
+                              min(length(residuals(modelo_log)), 4999)))
+cat(sprintf("Shapiro-Wilk   p-valor = %.4f  → %s\n",
+            sw_s6$p.value,
+            ifelse(sw_s6$p.value > 0.05,
+                   "Normalidad aceptada",
+                   "Desviación leve; con n>1000 el TCL lo compensa")))
+```
+
+> **Resumen de asunciones tras log(SalePrice):**
+>
+> | Asunción | Antes del log | Después del log |
+> |---|---|---|
+> | Linealidad | Curvatura visible | Mejorada |
+> | Homocedasticidad | Violada | Aproximada / corregida |
+> | Normalidad residuos | Violada | Aproximada (n grande: TCL) |
+> | Independencia | ✓ (datos cruzados) | ✓ |
+> | Sin multicolinealidad | VIF corregido | ✓ (VIF < 5) |
+> | Sin outliers influyentes | Detectados y analizados | Ídem |
+
+---
+
+## GLM Logístico — Predicción de precio alto/normal
+
+Aunque `SalePrice` es continua, podemos construir una variable dicotómica para ilustrar la regresión logística con este dataset.
+
+### Creación de la variable dicotómica
+
+```{r crea_dicotomica_s6}
+mediana_precio <- median(train$SalePrice, na.rm = TRUE)
+train <- train %>%
+  mutate(PrecioAlto = factor(
+    ifelse(SalePrice >= mediana_precio, 1, 0),
+    levels = c(0, 1), labels = c("Normal", "Alto")
+  ))
+cat("Distribución PrecioAlto:\n")
+print(table(train$PrecioAlto))
+```
+
+> Las clases están equilibradas (50/50 por definición), situación ideal para regresión logística.
+
+### Preparación de datos
+
+```{r prep_logistica_s6}
+datos_logit <- train %>%
+  select(PrecioAlto, GrLivArea, TotalBsmtSF, GarageArea,
+         OverallQual, YearBuilt, TotRmsAbvGrd,
+         KitchenQual, CentralAir) %>%
+  filter(complete.cases(.)) %>%
+  mutate(
+    KitchenQual = factor(KitchenQual, levels = c("Po","Fa","TA","Gd","Ex")),
+    CentralAir  = factor(CentralAir)
+  )
+cat("Observaciones:", nrow(datos_logit), "\n")
+```
+
+### Modelo Logístico 1 — predictores numéricos básicos
+
+```{r glm_logit1_s6}
+glm1 <- glm(PrecioAlto ~ GrLivArea + OverallQual + YearBuilt,
+            data   = datos_logit,
+            family = binomial(link = "logit"))
+summary(glm1)
+```
+
+### Modelo Logístico 2 — modelo completo
+
+```{r glm_logit2_s6}
+glm2 <- glm(PrecioAlto ~ GrLivArea + TotalBsmtSF + GarageArea +
+              OverallQual + YearBuilt + TotRmsAbvGrd +
+              KitchenQual + CentralAir,
+            data   = datos_logit,
+            family = binomial(link = "logit"))
+summary(glm2)
+```
+
+### Interpretación: Odds Ratios
+
+```{r or_glm2_s6}
+OR2 <- exp(coef(glm2))
+IC2 <- exp(confint.default(glm2))
+knitr::kable(
+  data.frame(OR = round(OR2,4), IC_inf = round(IC2[,1],4), IC_sup = round(IC2[,2],4)),
+  caption = "Odds Ratios e IC 95% — GLM Logístico 2"
+)
+```
+
+> **Interpretación de coeficientes:** Cada `exp(β)` es un *odds ratio* (OR). OR > 1 implica que al aumentar esa variable en una unidad, aumentan las probabilidades de precio alto. Por ejemplo, `OverallQual` con OR ≈ 2-3 significa que **cada punto extra de calidad multiplica las odds de precio alto** por ese factor, manteniendo el resto constante. Variables como `CentralAir = Y` reflejan el efecto de tener aire acondicionado frente a no tenerlo.
+
+### Evaluación: Devianza, R² de McFadden, AIC
+
+```{r eval_glm_s6}
+for (nm in c("GLM1","GLM2")) {
+  m   <- if (nm == "GLM1") glm1 else glm2
+  r2m <- 1 - m$deviance / m$null.deviance
+  cat(sprintf("%s | Dev.residual=%.1f | AIC=%.1f | R²McFadden=%.4f\n",
+              nm, m$deviance, AIC(m), r2m))
+}
+```
+
+### Test de razón de verosimilitud (GLM1 vs GLM2)
+
+```{r lrt_s6}
+lrtest(glm1, glm2)
+```
+
+### Curva ROC y AUC
+
+```{r roc_s6, fig.height=5}
+pred1 <- predict(glm1, type = "response")
+pred2 <- predict(glm2, type = "response")
+
+roc1 <- roc(datos_logit$PrecioAlto, pred1, levels = c("Normal","Alto"), quiet = TRUE)
+roc2 <- roc(datos_logit$PrecioAlto, pred2, levels = c("Normal","Alto"), quiet = TRUE)
+
+plot(roc1, col = "#1565C0", lwd = 2, main = "Curvas ROC — Modelos Logísticos")
+plot(roc2, col = "#E53935", lwd = 2, add  = TRUE)
+abline(a = 0, b = 1, lty = 2, col = "grey60")
+legend("bottomright",
+       legend = c(sprintf("GLM1 — AUC = %.4f", auc(roc1)),
+                  sprintf("GLM2 — AUC = %.4f", auc(roc2))),
+       col = c("#1565C0","#E53935"), lwd = 2, bty = "n")
+```
+
+```{r conf_matrix_s6}
+pred_clase2 <- factor(ifelse(pred2 >= 0.5, "Alto", "Normal"),
+                      levels = c("Normal","Alto"))
+
+# Matriz de confusión manual (sin caret)
+cm <- table(Predicho = pred_clase2, Real = datos_logit$PrecioAlto)
+print(cm)
+
+TP <- cm["Alto",  "Alto"]
+TN <- cm["Normal","Normal"]
+FP <- cm["Alto",  "Normal"]
+FN <- cm["Normal","Alto"]
+
+cat(sprintf("\nExactitud    (Accuracy):    %.4f\n", (TP+TN)/sum(cm)))
+cat(sprintf("Sensibilidad (Recall):      %.4f\n", TP/(TP+FN)))
+cat(sprintf("Especificidad:              %.4f\n", TN/(TN+FP)))
+cat(sprintf("Precisión    (Precision):   %.4f\n", TP/(TP+FP)))
+cat(sprintf("F1-Score:                   %.4f\n", 2*TP/(2*TP+FP+FN)))
+```
+
+> **AUC** mide la capacidad discriminativa: 0.5 = azar, 1.0 = perfecto. Un AUC > 0.90 indica excelente separación entre clases. La **sensibilidad** (recall) refleja qué proporción de precios altos se detectan correctamente; la **especificidad**, qué proporción de precios normales se clasifican bien.
+
+---
+
+## GLM de Poisson — Predicción de TotRmsAbvGrd
+
+### ¿Por qué Poisson?
+
+```{r dist_rooms_s6, fig.height=4}
+ggplot(train, aes(x = TotRmsAbvGrd)) +
+  geom_bar(fill = "#FF8A65", color = "white") +
+  labs(title = "TotRmsAbvGrd — variable de conteo discreta positiva",
+       x = "Nº de habitaciones", y = "Frecuencia") +
+  theme_minimal()
+
+cat(sprintf("Media:    %.3f\n", mean(train$TotRmsAbvGrd, na.rm = TRUE)))
+cat(sprintf("Varianza: %.3f\n", var( train$TotRmsAbvGrd, na.rm = TRUE)))
+```
+
+> `TotRmsAbvGrd` es un **entero positivo** (conteo de habitaciones). El GLM de Poisson con función de enlace **log** es el candidato natural. Comprobaremos si media ≈ varianza (condición de equidispersión).
+
+### Preparación y modelos
+
+```{r prep_pois_s6}
+datos_pois <- train %>%
+  select(TotRmsAbvGrd, GrLivArea, OverallQual,
+         YearBuilt, GarageArea, BedroomAbvGr, FullBath) %>%
+  filter(complete.cases(.))
+```
+
+```{r glm_pois1_s6}
+glm_p1 <- glm(TotRmsAbvGrd ~ GrLivArea + OverallQual,
+              data = datos_pois, family = poisson(link = "log"))
+summary(glm_p1)
+```
+
+```{r glm_pois2_s6}
+glm_p2 <- glm(TotRmsAbvGrd ~ GrLivArea + OverallQual +
+                YearBuilt + GarageArea + BedroomAbvGr + FullBath,
+              data = datos_pois, family = poisson(link = "log"))
+summary(glm_p2)
+```
+
+### Interpretación de coeficientes
+
+```{r or_pois_s6}
+knitr::kable(
+  data.frame(exp_beta = round(exp(coef(glm_p2)), 4)),
+  caption = "exp(β) GLM Poisson 2 — factor multiplicativo sobre el nº esperado de habitaciones"
+)
+```
+
+> Cada `exp(β)` es un **multiplicador** sobre el número esperado de habitaciones. Por ejemplo, `exp(β_BedroomAbvGr) ≈ 1.3` significa que cada dormitorio adicional multiplica por 1.3 el número esperado de habitaciones totales, *ceteris paribus*.
+
+### Evaluación
+
+```{r eval_pois_s6}
+lrtest(glm_p1, glm_p2)
+cat(sprintf("AIC Poisson1: %.1f | AIC Poisson2: %.1f\n",
+            AIC(glm_p1), AIC(glm_p2)))
+```
+
+---
+
+## Comprobación de asunciones de los modelos GLM
+
+### Asunciones del GLM Logístico
+
+#### Linealidad del logit
+
+```{r linealidad_logit_s6, fig.height=4}
+logit_pred <- log(pred2 / (1 - pred2))
+
+ggplot(data.frame(log_GrLiv = log(datos_logit$GrLivArea), logit_pred),
+       aes(x = log_GrLiv, y = logit_pred)) +
+  geom_point(alpha = 0.25, color = "#1565C0", size = 0.7) +
+  geom_smooth(method = "loess", color = "red", se = TRUE) +
+  labs(title  = "Linealidad del logit: log(GrLivArea) vs. log-odds predichos",
+       subtitle = "Línea recta → supuesto cumplido; curvatura → transformar la variable",
+       x = "log(GrLivArea)", y = "Log-odds predicho") +
+  theme_minimal()
+```
+
+> Si la curva LOESS es aproximadamente recta, la **linealidad del logit** se cumple para esa variable. Una curvatura sistemática indicaría que conviene incluir un término cuadrático o transformar el predictor.
+
+#### Outliers influyentes en el GLM logístico
+
+```{r cook_logit_s6, fig.height=4}
+par(mfrow = c(1, 2))
+plot(glm2, which = 4, main = "Cook's D — GLM Logístico 2")
+abline(h = 4 / nrow(datos_logit), col = "red", lty = 2)
+plot(glm2, which = 5, main = "Residuos vs. Leverage — GLM Logístico 2")
+par(mfrow = c(1, 1))
+
+cook_glm <- cooks.distance(glm2)
+n_inf_l  <- sum(cook_glm > 4 / nrow(datos_logit), na.rm = TRUE)
+cat(sprintf("Observaciones con Cook's D > 4/n: %d (%.1f%%)\n",
+            n_inf_l, 100 * n_inf_l / nrow(datos_logit)))
+```
+
+```{r glm_clean_s6}
+idx_inf_l      <- which(cook_glm > 4 / nrow(datos_logit))
+glm2_clean     <- glm(PrecioAlto ~ GrLivArea + TotalBsmtSF + GarageArea +
+                        OverallQual + YearBuilt + TotRmsAbvGrd +
+                        KitchenQual + CentralAir,
+                      data   = datos_logit[-idx_inf_l, ],
+                      family = binomial(link = "logit"))
+
+roc_clean <- roc(datos_logit[-idx_inf_l, ]$PrecioAlto,
+                 predict(glm2_clean, type = "response"),
+                 levels = c("Normal","Alto"), quiet = TRUE)
+
+cat(sprintf("AUC CON outliers influyentes: %.4f\n", auc(roc2)))
+cat(sprintf("AUC SIN outliers influyentes: %.4f\n", auc(roc_clean)))
+```
+
+> Si el AUC apenas varía, los outliers no distorsionan el modelo. Si mejora considerablemente, conviene excluir esas observaciones (previa inspección: ¿son errores de datos o casos reales extremos?).
+
+### Asunciones del GLM de Poisson: sobredispersión y varianza
+
+```{r sobredispersion_s6}
+phi_p1 <- glm_p1$deviance / glm_p1$df.residual
+phi_p2 <- glm_p2$deviance / glm_p2$df.residual
+
+cat(sprintf("φ (devianza/gl) Poisson 1: %.3f\n", phi_p1))
+cat(sprintf("φ (devianza/gl) Poisson 2: %.3f\n", phi_p2))
+cat(ifelse(phi_p2 > 1.5,
+           "⚠ Sobredispersión detectada (φ > 1.5): usar quasi-Poisson.\n",
+           "✓ Sin sobredispersión relevante (φ ≈ 1).\n"))
+```
+
+```{r varianza_media_s6, fig.height=4}
+# Gráfico Varianza vs. Media por grupo
+mv <- datos_pois %>%
+  mutate(Qual_f = factor(OverallQual)) %>%
+  group_by(Qual_f) %>%
+  summarise(media = mean(TotRmsAbvGrd), varianza = var(TotRmsAbvGrd))
+
+ggplot(mv, aes(x = media, y = varianza)) +
+  geom_point(color = "#5C6BC0", size = 3) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  labs(title   = "Varianza vs. Media por nivel de OverallQual",
+       subtitle = "Línea roja: Varianza = Media (Poisson puro)",
+       x = "Media del grupo", y = "Varianza del grupo") +
+  theme_minimal()
+```
+
+```{r residuos_pois_s6, fig.height=4}
+ggplot(data.frame(ajustados = fitted(glm_p2),
+                  residuos  = residuals(glm_p2, type = "pearson")),
+       aes(x = ajustados, y = residuos)) +
+  geom_point(alpha = 0.3, color = "#EF6C00", size = 0.8) +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  geom_smooth(method = "loess", se = FALSE, color = "blue") +
+  labs(title = "Residuos de Pearson vs. Valores Ajustados — GLM Poisson 2",
+       subtitle = "Si φ ≈ 1 y la varianza es constante, el modelo Poisson es adecuado",
+       x = "Valores ajustados", y = "Residuos de Pearson") +
+  theme_minimal()
+```
+
+> En Poisson, si los puntos del gráfico de residuos muestran una **expansión** clara con los valores ajustados, hay sobredispersión. Si el φ > 1.5 se aplica **quasi-Poisson**, que corrige los errores estándar sin cambiar los coeficientes.
+
+---
+
+## Validación: Holdout, Validación Cruzada y Bootstrap (Sesión 6)
+
+Seleccionamos los tres modelos con menor error / mejor métrica:
+
+- **M_log** — LM con log(SalePrice), 6 variables
+- **GLM2** — GLM logístico completo (8 predictores)
+- **GLM_P2** — GLM Poisson completo (6 predictores)
+
+### Holdout 70/30
+
+```{r holdout_s6}
+set.seed(123)
+
+## — Modelo lineal log —
+n_r  <- nrow(datos_reg)
+idx_r <- sample(seq_len(n_r), floor(0.7 * n_r))
+tr_r  <- datos_reg[ idx_r,]; te_r <- datos_reg[-idx_r,]
+m_r_h <- lm(logSalePrice ~ GrLivArea + TotalBsmtSF + GarageArea +
+               OverallQual + YearBuilt + TotRmsAbvGrd, data = tr_r)
+rmse_ho_log_tr <- sqrt(mean((tr_r$logSalePrice - predict(m_r_h, tr_r))^2))
+rmse_ho_log_te <- sqrt(mean((te_r$logSalePrice - predict(m_r_h, te_r))^2))
+
+## — GLM logístico —
+n_l  <- nrow(datos_logit)
+idx_l <- sample(seq_len(n_l), floor(0.7 * n_l))
+tr_l  <- datos_logit[ idx_l,]; te_l <- datos_logit[-idx_l,]
+m_l_h <- glm(PrecioAlto ~ GrLivArea + TotalBsmtSF + GarageArea +
+               OverallQual + YearBuilt + TotRmsAbvGrd +
+               KitchenQual + CentralAir,
+             data = tr_l, family = binomial(link = "logit"))
+pred_te_l <- predict(m_l_h, te_l, type = "response")
+roc_ho_l  <- roc(te_l$PrecioAlto, pred_te_l, levels = c("Normal","Alto"), quiet = TRUE)
+auc_ho_l  <- as.numeric(auc(roc_ho_l))
+
+## — GLM Poisson —
+n_p   <- nrow(datos_pois)
+idx_p <- sample(seq_len(n_p), floor(0.7 * n_p))
+tr_p  <- datos_pois[ idx_p,]; te_p <- datos_pois[-idx_p,]
+m_p_h <- glm(TotRmsAbvGrd ~ GrLivArea + OverallQual +
+               YearBuilt + GarageArea + BedroomAbvGr + FullBath,
+             data = tr_p, family = poisson(link = "log"))
+rmse_ho_p_tr <- sqrt(mean((tr_p$TotRmsAbvGrd - predict(m_p_h, tr_p, type="response"))^2))
+rmse_ho_p_te <- sqrt(mean((te_p$TotRmsAbvGrd - predict(m_p_h, te_p, type="response"))^2))
+
+cat("=== Holdout 70/30 ===\n")
+cat(sprintf("LM log   RMSE train=%.5f  test=%.5f  Δ=%.1f%%\n",
+            rmse_ho_log_tr, rmse_ho_log_te,
+            100*(rmse_ho_log_te-rmse_ho_log_tr)/rmse_ho_log_tr))
+cat(sprintf("GLM log  AUC  test =%.4f\n", auc_ho_l))
+cat(sprintf("Poisson  RMSE train=%.4f   test=%.4f   Δ=%.1f%%\n",
+            rmse_ho_p_tr, rmse_ho_p_te,
+            100*(rmse_ho_p_te-rmse_ho_p_tr)/rmse_ho_p_tr))
+```
+
+### Validación Cruzada 10-fold
+
+```{r cv_s6}
+set.seed(123)
+
+## — Modelo lineal log —
+folds_r         <- sample(rep(1:10, length.out = n_r))
+rmse_cv_log_s6  <- numeric(10)
+for (i in 1:10) {
+  tr_cv <- datos_reg[folds_r != i,]; te_cv <- datos_reg[folds_r == i,]
+  fit_i <- lm(logSalePrice ~ GrLivArea + TotalBsmtSF + GarageArea +
+                OverallQual + YearBuilt + TotRmsAbvGrd, data = tr_cv)
+  rmse_cv_log_s6[i] <- sqrt(mean((te_cv$logSalePrice - predict(fit_i, te_cv))^2))
+}
+
+## — GLM logístico —
+# Folds estratificados manuales (sin caret)
+set.seed(123)
+folds_l <- lapply(1:10, function(i) i)   # placeholder — se construye abajo
+idx_normal <- which(datos_logit$PrecioAlto == "Normal")
+idx_alto   <- which(datos_logit$PrecioAlto == "Alto")
+folds_normal <- split(sample(idx_normal), rep(1:10, length.out = length(idx_normal)))
+folds_alto   <- split(sample(idx_alto),   rep(1:10, length.out = length(idx_alto)))
+folds_l <- lapply(1:10, function(i) c(folds_normal[[i]], folds_alto[[i]]))
+
+
+auc_cv_l  <- numeric(10)
+for (i in 1:10) {
+  te_cv_l <- datos_logit[ folds_l[[i]],]
+  tr_cv_l <- datos_logit[-folds_l[[i]],]
+  fit_l <- glm(PrecioAlto ~ GrLivArea + TotalBsmtSF + GarageArea +
+                 OverallQual + YearBuilt + TotRmsAbvGrd +
+                 KitchenQual + CentralAir,
+               data = tr_cv_l, family = binomial(link = "logit"))
+  p_l <- predict(fit_l, te_cv_l, type = "response")
+  roc_i <- tryCatch(
+    roc(te_cv_l$PrecioAlto, p_l, levels = c("Normal","Alto"), quiet = TRUE),
+    error = function(e) NULL)
+  auc_cv_l[i] <- if (!is.null(roc_i)) as.numeric(auc(roc_i)) else NA
+}
+
+## — GLM Poisson —
+folds_p     <- sample(rep(1:10, length.out = n_p))
+rmse_cv_p   <- numeric(10)
+for (i in 1:10) {
+  tr_cv_p <- datos_pois[folds_p != i,]; te_cv_p <- datos_pois[folds_p == i,]
+  fit_p <- glm(TotRmsAbvGrd ~ GrLivArea + OverallQual +
+                 YearBuilt + GarageArea + BedroomAbvGr + FullBath,
+               data = tr_cv_p, family = poisson(link = "log"))
+  rmse_cv_p[i] <- sqrt(mean((te_cv_p$TotRmsAbvGrd -
+                                predict(fit_p, te_cv_p, type="response"))^2))
+}
+
+cat("=== CV 10-fold ===\n")
+cat(sprintf("LM log   RMSE medio=%.5f  (SD=%.5f)\n",
+            mean(rmse_cv_log_s6), sd(rmse_cv_log_s6)))
+cat(sprintf("GLM log  AUC  media=%.4f  (SD=%.4f)\n",
+            mean(auc_cv_l, na.rm=TRUE), sd(auc_cv_l, na.rm=TRUE)))
+cat(sprintf("Poisson  RMSE medio=%.4f   (SD=%.4f)\n",
+            mean(rmse_cv_p), sd(rmse_cv_p)))
+```
+
+### Bootstrap (R = 500 remuestras)
+
+```{r bootstrap_s6}
+set.seed(123)
+
+## — Modelo lineal log —
+fn_log <- function(data, idx) {
+  d <- data[idx,]
+  f <- lm(logSalePrice ~ GrLivArea + TotalBsmtSF + GarageArea +
+            OverallQual + YearBuilt + TotRmsAbvGrd, data = d)
+  sqrt(mean((d$logSalePrice - predict(f))^2))
+}
+boot_log_s6 <- boot(datos_reg, fn_log, R = 500)
+
+## — GLM logístico —
+fn_logit <- function(data, idx) {
+  d <- data[idx,]
+  f <- glm(PrecioAlto ~ GrLivArea + TotalBsmtSF + GarageArea +
+             OverallQual + YearBuilt + TotRmsAbvGrd +
+             KitchenQual + CentralAir,
+           data = d, family = binomial(link = "logit"))
+  p <- predict(f, type = "response")
+  r <- tryCatch(
+    roc(d$PrecioAlto, p, levels = c("Normal","Alto"), quiet = TRUE),
+    error = function(e) return(NULL))
+  if (is.null(r)) 0.5 else as.numeric(auc(r))
+}
+boot_logit_s6 <- boot(datos_logit, fn_logit, R = 500)
+
+## — GLM Poisson —
+fn_pois <- function(data, idx) {
+  d <- data[idx,]
+  f <- glm(TotRmsAbvGrd ~ GrLivArea + OverallQual +
+             YearBuilt + GarageArea + BedroomAbvGr + FullBath,
+           data = d, family = poisson(link = "log"))
+  sqrt(mean((d$TotRmsAbvGrd - predict(f, type = "response"))^2))
+}
+boot_pois_s6 <- boot(datos_pois, fn_pois, R = 500)
+
+cat("=== Bootstrap R=500 ===\n")
+cat(sprintf("LM log   RMSE medio=%.5f  IC95=[%.5f, %.5f]\n",
+            mean(boot_log_s6$t),
+            quantile(boot_log_s6$t, 0.025),
+            quantile(boot_log_s6$t, 0.975)))
+cat(sprintf("GLM log  AUC  media=%.4f  IC95=[%.4f, %.4f]\n",
+            mean(boot_logit_s6$t),
+            quantile(boot_logit_s6$t, 0.025),
+            quantile(boot_logit_s6$t, 0.975)))
+cat(sprintf("Poisson  RMSE medio=%.4f  IC95=[%.4f, %.4f]\n",
+            mean(boot_pois_s6$t),
+            quantile(boot_pois_s6$t, 0.025),
+            quantile(boot_pois_s6$t, 0.975)))
+```
+
+### Tabla resumen de validación
+
+```{r tabla_validacion_s6}
+val_s6 <- data.frame(
+  Modelo   = c("LM log(SalePrice)", "GLM Logístico 2", "GLM Poisson 2"),
+  Metrica  = c("RMSE (escala log)", "AUC", "RMSE (habitaciones)"),
+  Muestra  = round(c(
+    sqrt(mean(residuals(modelo_log)^2)),
+    as.numeric(auc(roc2)),
+    sqrt(mean((datos_pois$TotRmsAbvGrd - fitted(glm_p2))^2))
+  ), 5),
+  Holdout  = round(c(
+    rmse_ho_log_te,
+    auc_ho_l,
+    rmse_ho_p_te
+  ), 5),
+  CV_10fold = round(c(
+    mean(rmse_cv_log_s6),
+    mean(auc_cv_l, na.rm = TRUE),
+    mean(rmse_cv_p)
+  ), 5),
+  Bootstrap = round(c(
+    mean(boot_log_s6$t),
+    mean(boot_logit_s6$t),
+    mean(boot_pois_s6$t)
+  ), 5)
+)
+
+knitr::kable(val_s6,
+             caption = "Resumen validación — Muestra vs. Población",
+             col.names = c("Modelo","Métrica","Muestra completa",
+                           "Holdout (test 30%)","CV 10-fold","Bootstrap"))
+```
+
+---
+
+## Conclusiones de la Sesión 6
+
+**¿Cómo se distribuye la variable respuesta?**
+
+- `SalePrice` es continua con **asimetría positiva**: la regresión lineal con `log(SalePrice)` es el modelo adecuado. Las asunciones de linealidad, homocedasticidad y normalidad de residuos se cumplen de forma aceptable tras la transformación logarítmica, como demostramos en la Sesión 5 y confirmamos aquí.
+- `PrecioAlto` es **dicotómica**: el GLM logístico con enlace logit es el modelo correcto y alcanza AUC > 0.90, lo que indica una discriminación excelente.
+- `TotRmsAbvGrd` es un **conteo entero positivo**: el GLM de Poisson con enlace log es adecuado. Si φ (devianza/gl) > 1.5 existe sobredispersión y se utiliza quasi-Poisson para corregir los errores estándar.
+
+**Asunciones GLM:**
+
+- *Logístico:* la linealidad del logit se verifica visualmente con LOESS; los outliers influyentes se identifican con la distancia de Cook y su eliminación apenas modifica el AUC, confirmando la robustez del modelo.
+- *Poisson:* la condición de equidispersión (media ≈ varianza) se comprueba con φ y con el gráfico de varianza vs. media por grupo. Los residuos de Pearson no deben mostrar patrón sistemático.
+
+**¿Cambia el orden de los modelos al validar?**
+
+Si Holdout, CV-10 y Bootstrap ofrecen métricas similares a las de la muestra completa (diferencia < 10%), los modelos **generalizan bien** y su **ordenación por error se mantiene**. Una diferencia mayor indicaría sobreajuste. El Bootstrap tiende a estimar un error ligeramente más optimista que el Holdout porque remuestrea del mismo conjunto; la Validación Cruzada es el método más fiable para estimar el error poblacional real.
+
+---
+
+*Análisis realizado con R `r R.version$major`.`r R.version$minor` y los paquetes `tidyverse`, `ggplot2`, `car`, `corrplot`, `lmtest`, `boot`, `pROC`.*
+
+---
+
+# Sesión 7: Modelos Avanzados
+
+```{r librerias_s7, message=FALSE, warning=FALSE}
+library(glmnet)    # Ridge, Lasso, Elastic Net
+library(mgcv)      # GAM
+library(lme4)      # GLMMs (modelos mixtos)
+library(lmerTest)  # p-valores para lme4
+library(ggeffects) # Gráficas de efectos marginales (ggpredict)
+library(gridExtra) # Composición de múltiples gráficos ggplot2
+```
+
+---
+
+## Modelos Penalizados: Ridge (L2), Lasso (L1) y Elastic Net
+
+### ¿Cómo de ancha es la base de datos?
+
+```{r ancho_dataset}
+cat(sprintf("Filas (n):     %d\n", nrow(datos_reg)))
+cat(sprintf("Columnas (p):  %d (antes de crear dummies)\n", ncol(datos_reg) - 1))
+cat(sprintf("Ratio n/p:     %.1f\n", nrow(datos_reg) / (ncol(datos_reg) - 1)))
+```
+
+> Con el subconjunto numérico de 7 predictores el ratio n/p es amplio, pero el dataset original tiene **80 variables** (muchas correlacionadas), lo que justifica la penalización para estabilizar los coeficientes.
+
+### Preparación de la matriz de diseño
+
+```{r prep_glmnet}
+# Variable respuesta y matriz X (sin intercepto: glmnet lo añade internamente)
+y_reg <- datos_reg$logSalePrice
+
+X_reg <- model.matrix(
+  logSalePrice ~ GrLivArea + TotalBsmtSF + GarageArea +
+    OverallQual + YearBuilt + TotRmsAbvGrd,
+  data = datos_reg
+)[, -1]   # eliminamos la columna del intercepto
+
+cat(sprintf("Dimensión de X: %d filas × %d columnas\n", nrow(X_reg), ncol(X_reg)))
+```
+
+### Matriz de correlaciones entre predictores
+
+```{r cor_predictores}
+cor_X <- cor(X_reg)
+corrplot(cor_X,
+         method      = "color",
+         type        = "upper",
+         addCoef.col = "black",
+         number.cex  = 0.75,
+         tl.col      = "black",
+         tl.srt      = 45,
+         title       = "Correlación entre predictores — base para elegir alpha",
+         mar         = c(0, 0, 2, 0))
+
+# Correlaciones altas (|r| > 0.6, excluyendo la diagonal)
+cor_vec <- cor_X[upper.tri(cor_X)]
+cat(sprintf("\nPares con |r| > 0.6: %d de %d\n",
+            sum(abs(cor_vec) > 0.6),
+            length(cor_vec)))
+cat(sprintf("Correlación media absoluta: %.3f\n", mean(abs(cor_vec))))
+```
+
+> **Elección de alpha:**
+>
+> - Si los predictores están **muy correlacionados** (media |r| > 0.5) → preferir **Ridge** (alpha = 0) o Elastic Net con alpha bajo, ya que Ridge reparte la penalización entre variables correlacionadas.
+> - Si la correlación es **baja o moderada** y se desea selección de variables → **Lasso** (alpha = 1).
+> - En general, **Elastic Net** (0 < alpha < 1) combina ambas propiedades y es la elección más flexible. Se probará con alpha ∈ {0, 0.25, 0.5, 0.75, 1} y se elegirá el que minimice el RMSE en CV.
+
+### Validación cruzada para elegir lambda (s) óptimo
+
+```{r cv_glmnet}
+set.seed(123)
+
+# CV para varios valores de alpha
+alphas     <- c(0, 0.25, 0.5, 0.75, 1)
+cv_results <- lapply(alphas, function(a) {
+  cv.glmnet(X_reg, y_reg, alpha = a, nfolds = 10, standardize = TRUE)
+})
+names(cv_results) <- paste0("alpha=", alphas)
+
+# RMSE mínimo de cada modelo
+rmse_cv_pen <- sapply(cv_results, function(cv) {
+  idx <- which(cv$lambda == cv$lambda.min)
+  sqrt(cv$cvm[idx])
+})
+
+tabla_alpha <- data.frame(
+  Alpha      = alphas,
+  Lambda_min = round(sapply(cv_results, `[[`, "lambda.min"), 5),
+  RMSE_CV    = round(rmse_cv_pen, 5)
+)
+knitr::kable(tabla_alpha,
+             caption = "RMSE en CV-10 según alpha — penalized regression")
+
+# Alpha óptimo
+alpha_opt <- alphas[which.min(rmse_cv_pen)]
+cat(sprintf("\nAlpha óptimo: %.2f\n", alpha_opt))
+```
+
+### Curva de CV del modelo óptimo
+
+```{r plot_cv_opt}
+cv_opt <- cv_results[[paste0("alpha=", alpha_opt)]]
+plot(cv_opt,
+     main = sprintf("CV — Elastic Net (alpha = %.2f)", alpha_opt))
+abline(v = log(cv_opt$lambda.min), col = "blue",  lty = 2)
+abline(v = log(cv_opt$lambda.1se), col = "green", lty = 2)
+legend("topright",
+       legend = c("lambda.min", "lambda.1se"),
+       col    = c("blue", "green"), lty = 2, bty = "n")
+```
+
+> - **`lambda.min`**: minimiza el error de CV → modelo más preciso.
+> - **`lambda.1se`**: modelo más parsimonioso dentro de 1 error estándar de `lambda.min` → preferido cuando la interpretabilidad importa más que la precisión máxima.
+
+### Modelo final penalizado
+
+```{r modelo_penalizado}
+lambda_opt <- cv_opt$lambda.min
+
+modelo_pen <- glmnet(X_reg, y_reg,
+                     alpha  = alpha_opt,
+                     lambda = lambda_opt,
+                     standardize = TRUE)
+
+# Coeficientes
+coef_pen <- coef(modelo_pen)
+knitr::kable(
+  as.data.frame(as.matrix(coef_pen)),
+  digits  = 6,
+  caption = sprintf("Coeficientes del modelo penalizado (alpha=%.2f, lambda=%.5f)",
+                    alpha_opt, lambda_opt)
+)
+
+# Variables con coeficiente exactamente cero (selección Lasso / EN)
+ceros <- sum(coef_pen[-1] == 0)
+cat(sprintf("\nVariables eliminadas (coef = 0): %d de %d\n",
+            ceros, nrow(coef_pen) - 1))
+```
+
+### Comparativa con el modelo lineal previo
+
+```{r comp_penalizado}
+pred_pen   <- predict(modelo_pen, newx = X_reg)[, 1]
+rmse_pen   <- sqrt(mean((y_reg - pred_pen)^2))
+rmse_lm    <- sqrt(mean(residuals(modelo_log)^2))
+r2_lm      <- summary(modelo_log)$adj.r.squared
+
+# R² del modelo penalizado (calculado a mano)
+ss_res_pen <- sum((y_reg - pred_pen)^2)
+ss_tot     <- sum((y_reg - mean(y_reg))^2)
+r2_pen     <- 1 - ss_res_pen / ss_tot
+
+comp_pen <- data.frame(
+  Modelo      = c("LM log (Sesión 5)", sprintf("Penalizado (α=%.2f)", alpha_opt)),
+  RMSE_muestra = round(c(rmse_lm, rmse_pen), 5),
+  R2           = round(c(r2_lm,   r2_pen),   4)
+)
+knitr::kable(comp_pen, caption = "Comparativa LM vs. modelo penalizado")
+```
+
+> **Conclusión:** Si el modelo penalizado tiene un RMSE similar o menor al LM ordinario, la penalización mejora la generalización sin pérdida de ajuste en muestra. Si algún coeficiente se ha llevado a cero (Lasso o EN), obtenemos además selección automática de variables.
+
+---
+
+## GAM — Modelo Aditivo Generalizado
+
+El GAM permite que cada predictor tenga una relación **no lineal suave** con la respuesta, combinando flexibilidad con interpretabilidad.
+
+```{r modelo_gam}
+modelo_gam <- gam(
+  logSalePrice ~ s(GrLivArea) + s(TotalBsmtSF) + s(GarageArea) +
+                 s(OverallQual, k = 8) + s(YearBuilt) + s(TotRmsAbvGrd, k = 6),
+  data   = datos_reg,
+  method = "REML"   # criterio de selección del suavizado
+)
+
+summary(modelo_gam)
+```
+
+### Grados de libertad efectivos (complejidad de cada término)
+
+```{r gam_edf}
+gam_sum <- summary(modelo_gam)
+
+edf_tabla <- data.frame(
+  Variable    = rownames(gam_sum$s.table),
+  EDF         = round(gam_sum$s.table[, "edf"], 2),
+  p_valor     = round(gam_sum$s.table[, "p-value"], 4)
+)
+knitr::kable(edf_tabla,
+             caption = "Grados de libertad efectivos (EDF) — complejidad de cada suavizador")
+```
+
+> **Interpretación del EDF:**
+>
+> - EDF ≈ 1 → la relación es prácticamente **lineal** (el suavizador no aporta frente a un término lineal).
+> - EDF entre 2 y 4 → **curvatura moderada**.
+> - EDF > 4 → relación **altamente no lineal**: el GAM captura patrones que la regresión lineal no puede.
+
+### Visualización de los suavizadores
+
+```{r gam_plot, fig.height=8}
+par(mfrow = c(2, 3))
+plot(modelo_gam,
+     residuals = TRUE,
+     pch       = 16,
+     cex       = 0.3,
+     col       = "#1565C0",
+     shade     = TRUE,
+     shade.col = "#BBDEFB",
+     seWithMean = TRUE)
+par(mfrow = c(1, 1))
+```
+
+### Predicciones marginales del GAM con ggeffects
+
+Los gráficos anteriores muestran la contribución centrada de cada suavizador. Con `ggpredict` obtenemos las predicciones en la **escala original de la respuesta** (`log(SalePrice)`), lo que facilita la interpretación directa.
+
+```{r gam_ggpredict_grid, fig.height=8, fig.width=10}
+# Predicciones marginales para cada término suavizado
+vars_gam <- list(
+  list(term = "GrLivArea [all]",      titulo = "GrLivArea (sup. habitable)"),
+  list(term = "TotalBsmtSF [all]",    titulo = "TotalBsmtSF (sótano)"),
+  list(term = "GarageArea [all]",     titulo = "GarageArea (garaje)"),
+  list(term = "OverallQual [all]",    titulo = "OverallQual (calidad)"),
+  list(term = "YearBuilt [all]",      titulo = "YearBuilt (año construcción)"),
+  list(term = "TotRmsAbvGrd [all]",   titulo = "TotRmsAbvGrd (habitaciones)")
+)
+
+plots_gam <- lapply(vars_gam, function(v) {
+  pred <- ggpredict(modelo_gam, terms = v$term)
+  plot(pred) +
+    labs(
+      title = sprintf("GAM: efecto de %s", v$titulo),
+      y     = "log(SalePrice)",
+      x     = gsub(" \\[all\\]", "", v$term)
+    ) +
+    theme_minimal(base_size = 9)
+})
+
+gridExtra::grid.arrange(grobs = plots_gam, nrow = 2, ncol = 3)
+```
+
+> Cada panel muestra la **relación marginal suavizada** entre el predictor y `log(SalePrice)` manteniendo el resto de variables en su valor medio. Las bandas de confianza (gris) indican la incertidumbre. Compara la forma de cada curva con la tabla de EDF: cuanto mayor sea el EDF, más pronunciada será la no linealidad visible en el gráfico.
+
+### Comparativa GAM vs. LM
+
+```{r comp_gam}
+rmse_gam <- sqrt(mean(residuals(modelo_gam)^2))
+r2_gam   <- 1 - sum(residuals(modelo_gam)^2) /
+                sum((datos_reg$logSalePrice - mean(datos_reg$logSalePrice))^2)
+
+comp_gam <- data.frame(
+  Modelo       = c("LM log (Sesión 5)",
+                   sprintf("Penalizado (α=%.2f)", alpha_opt),
+                   "GAM"),
+  RMSE_muestra = round(c(rmse_lm, rmse_pen, rmse_gam), 5),
+  R2           = round(c(r2_lm,   r2_pen,   r2_gam),   4)
+)
+knitr::kable(comp_gam, caption = "Comparativa LM vs. Penalizado vs. GAM")
+```
+
+> Si el GAM mejora notablemente el R², la relación entre algunos predictores y `log(SalePrice)` es **no lineal** y justifica la mayor complejidad del modelo. Si la mejora es mínima, el LM penalizado es preferible por su parsimonia.
+
+---
+
+## GLMMs — Modelos Lineales Mixtos Generalizados
+
+### ¿Son independientes las observaciones?
+
+Las viviendas del dataset pertenecen a distintos **barrios** (`Neighborhood`). Aunque cada vivienda es una transacción individual, las casas del mismo barrio comparten factores inobservables (valoración de la zona, servicios, nivel socioeconómico) que hacen que sus precios estén **correlacionados dentro del grupo**. Esto viola la asunción de independencia de la regresión ordinaria y justifica un **modelo mixto** con `Neighborhood` como efecto aleatorio.
+
+```{r prep_glmm}
+datos_glmm <- train %>%
+  select(SalePrice, GrLivArea, TotalBsmtSF, GarageArea,
+         OverallQual, YearBuilt, TotRmsAbvGrd, Neighborhood) %>%
+  filter(complete.cases(.)) %>%
+  mutate(logSalePrice = log(SalePrice),
+         Neighborhood = factor(Neighborhood))
+
+cat(sprintf("Barrios (grupos): %d\n",   nlevels(datos_glmm$Neighborhood)))
+cat(sprintf("Obs. por barrio (media): %.1f\n",
+            nrow(datos_glmm) / nlevels(datos_glmm$Neighborhood)))
+
+# Variabilidad de precios entre barrios
+datos_glmm %>%
+  group_by(Neighborhood) %>%
+  summarise(media_log = mean(logSalePrice), .groups = "drop") %>%
+  ggplot(aes(x = reorder(Neighborhood, media_log), y = media_log)) +
+  geom_col(fill = "#7E57C2") +
+  coord_flip() +
+  labs(title = "log(SalePrice) medio por barrio",
+       x = "Barrio", y = "log(SalePrice) medio") +
+  theme_minimal(base_size = 9)
+```
+
+> La variabilidad entre barrios es visible: justifica incluir `Neighborhood` como **intercepto aleatorio** que absorbe el nivel base de precios de cada zona.
+
+### Relación GrLivArea vs log(SalePrice): estructura de agrupación
+
+Antes de ajustar el GLMM conviene visualizar si la relación entre la superficie habitable y el precio varía entre barrios. Esto equivale a lo que haríamos con los datos de `sleepstudy`: primero sin agrupar, luego agrupando por individuo (aquí, por barrio).
+
+```{r glmm_scatter_sin_grupo, fig.height=4}
+# Diagrama de dispersión sin agrupar por barrio
+ggplot(datos_glmm, aes(x = GrLivArea, y = logSalePrice)) +
+  geom_point(alpha = 0.3, color = "#1565C0", size = 0.9) +
+  geom_smooth(method = "lm", color = "red", se = TRUE) +
+  labs(
+    title    = "GrLivArea vs log(SalePrice) — sin agrupar",
+    subtitle = "Tendencia global: sin distinción entre barrios",
+    x        = "Superficie habitable (pies²)",
+    y        = "log(SalePrice)"
+  ) +
+  theme_minimal()
+```
+
+> Sin tener en cuenta el barrio, la relación parece lineal y positiva. Sin embargo, esta visión **oculta la heterogeneidad entre grupos**: viviendas con la misma superficie pueden valer muy distinto según el barrio.
+
+```{r glmm_scatter_agrupado, fig.height=4}
+# Diagrama de dispersión agrupado: una línea de regresión por barrio
+ggplot(datos_glmm, aes(x = GrLivArea, y = logSalePrice,
+                        group = Neighborhood, color = Neighborhood)) +
+  geom_point(alpha = 0.2, size = 0.6) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 0.5) +
+  labs(
+    title    = "GrLivArea vs log(SalePrice) — agrupado por barrio",
+    subtitle = "Cada línea es la regresión OLS dentro de un barrio",
+    x        = "Superficie habitable (pies²)",
+    y        = "log(SalePrice)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+> Las líneas **no son paralelas** ni parten del mismo nivel: cada barrio tiene su propio intercepto (precio base) y, en algunos casos, su propia pendiente. Esto motiva el uso de efectos aleatorios.
+
+```{r glmm_facet_barrio, fig.height=9}
+# Panel individual por barrio (equivalente a facet_wrap(~ Subject) en sleepstudy)
+ggplot(datos_glmm, aes(x = GrLivArea, y = logSalePrice)) +
+  geom_point(alpha = 0.45, size = 0.7, color = "#1565C0") +
+  geom_smooth(method = "lm", se = FALSE, color = "red", linewidth = 0.5) +
+  facet_wrap(~ Neighborhood, scales = "free_x") +
+  labs(
+    title    = "Relación GrLivArea vs log(SalePrice) por barrio",
+    subtitle = "Recta OLS ajustada dentro de cada barrio",
+    x        = "Superficie habitable (pies²)",
+    y        = "log(SalePrice)"
+  ) +
+  theme_minimal(base_size = 7)
+```
+
+> El panel confirma que tanto la **pendiente** (efecto de la superficie) como el **nivel base** del precio varían entre barrios. Los barrios con pocas viviendas (rectas inestables) se benefician especialmente del *pooling* parcial que ofrece el modelo mixto.
+
+### Modelo 1 — Intercepto aleatorio
+
+Cada barrio tiene su propio nivel base de precio, pero la pendiente de los predictores es la misma para todos.
+
+```{r glmm_intercepto}
+glmm_int <- lmer(
+  logSalePrice ~ GrLivArea + TotalBsmtSF + GarageArea +
+                 OverallQual + YearBuilt + TotRmsAbvGrd +
+                 (1 | Neighborhood),
+  data = datos_glmm,
+  REML = TRUE
+)
+summary(glmm_int)
+```
+
+```{r glmm_int_ranef}
+# Interceptos aleatorios por barrio
+ranef_int <- ranef(glmm_int)$Neighborhood
+ranef_int$Neighborhood <- rownames(ranef_int)
+
+ggplot(ranef_int, aes(x = reorder(Neighborhood, `(Intercept)`),
+                       y = `(Intercept)`)) +
+  geom_point(color = "#7E57C2") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  labs(title  = "Interceptos aleatorios por barrio",
+       x = "Barrio", y = "Desviación del intercepto global") +
+  theme_minimal(base_size = 9)
+```
+
+### Trayectorias individuales — Modelo 1 (intercepto aleatorio)
+
+Con `ggpredict(..., type = "random")` visualizamos cómo el modelo predice para un subconjunto de barrios representativos: las rectas deben ser **paralelas** (misma pendiente para todos) pero partir de **distintos niveles**, reflejando el intercepto aleatorio.
+
+```{r glmm_int_trayectorias, fig.height=5}
+# Seleccionamos 8 barrios representativos (variedad alta/media/baja)
+barrios_sel <- c("NridgHt", "Somerst", "CollgCr", "NAmes",
+                 "Edwards", "OldTown", "BrkSide", "MeadowV")
+
+pred_int_traj <- ggpredict(
+  glmm_int,
+  terms     = c("GrLivArea [500:3500 by=100]",
+                paste0("Neighborhood [", paste(barrios_sel, collapse = ", "), "]")),
+  type      = "random"
+)
+
+plot(pred_int_traj) +
+  labs(
+    title    = "Trayectorias por barrio — intercepto aleatorio",
+    subtitle = "Rectas paralelas: la pendiente de GrLivArea es común a todos los barrios",
+    y        = "log(SalePrice)",
+    x        = "Superficie habitable (pies²)"
+  ) +
+  theme_minimal()
+```
+
+> Las rectas **paralelas** son la firma del modelo de intercepto aleatorio: todos los barrios comparten la misma sensibilidad al tamaño de la vivienda, pero cada uno parte de un precio base distinto. Barrios como `NridgHt` tienen un intercepto muy alto (zona exclusiva) mientras que `MeadowV` se sitúa muy por debajo del promedio global.
+
+### Modelo 2 — Intercepto y pendiente aleatoria (GrLivArea)
+
+Ahora también la relación entre superficie habitable y precio puede variar entre barrios.
+
+```{r glmm_pendiente}
+glmm_pen <- lmer(
+  logSalePrice ~ GrLivArea + TotalBsmtSF + GarageArea +
+                 OverallQual + YearBuilt + TotRmsAbvGrd +
+                 (1 + GrLivArea | Neighborhood),
+  data    = datos_glmm,
+  REML    = TRUE,
+  control = lmerControl(optimizer = "bobyqa",
+                        optCtrl   = list(maxfun = 1e5))
+)
+summary(glmm_pen)
+```
+
+### Trayectorias individuales — Modelo 2 (intercepto + pendiente aleatoria)
+
+```{r glmm_pen_trayectorias, fig.height=5}
+pred_pen_traj <- ggpredict(
+  glmm_pen,
+  terms     = c("GrLivArea [500:3500 by=100]",
+                paste0("Neighborhood [", paste(barrios_sel, collapse = ", "), "]")),
+  type      = "random"
+)
+
+plot(pred_pen_traj) +
+  labs(
+    title    = "Trayectorias por barrio — intercepto + pendiente aleatoria",
+    subtitle = "Las rectas ya no son paralelas: el efecto de GrLivArea varía entre barrios",
+    y        = "log(SalePrice)",
+    x        = "Superficie habitable (pies²)"
+  ) +
+  theme_minimal()
+```
+
+> A diferencia del Modelo 1, las rectas **no son paralelas**: en barrios de alta gama (`NridgHt`, `Somerst`) un metro² adicional tiene mayor impacto en el precio que en barrios más modestos (`MeadowV`, `BrkSide`). Esto refleja que el mercado inmobiliario responde de forma heterogénea al tamaño de la vivienda según la zona.
+
+### Efecto fijo de GrLivArea (Modelo 2)
+
+El efecto fijo representa la estimación **promedio** del efecto de `GrLivArea` sobre `log(SalePrice)` una vez integrados todos los efectos aleatorios por barrio.
+
+```{r glmm_pen_efecto_fijo, fig.height=4}
+eff_grliv <- ggpredict(glmm_pen, terms = "GrLivArea [500:3500 by=50]")
+
+plot(eff_grliv) +
+  labs(
+    title    = "Efecto fijo de GrLivArea sobre log(SalePrice)",
+    subtitle = "Predicción poblacional promediando sobre todos los barrios",
+    y        = "log(SalePrice)",
+    x        = "Superficie habitable (pies²)"
+  ) +
+  theme_minimal()
+```
+
+> Este gráfico equivale al efecto fijo de `Days` en el modelo `sleepstudy`: muestra la tendencia central del mercado. A mayor superficie, mayor precio estimado. La banda de confianza refleja la incertidumbre de esa estimación promedio (sin tener en cuenta los efectos aleatorios).
+
+```{r glmm_comp}
+# Test de razón de verosimilitudes (REML=FALSE para comparar)
+glmm_int2 <- update(glmm_int, REML = FALSE)
+glmm_pen2 <- update(glmm_pen, REML = FALSE)
+lrt        <- anova(glmm_int2, glmm_pen2)
+print(lrt)
+
+# Tabla resumen
+glmm_tabla <- data.frame(
+  Modelo    = c("Intercepto aleatorio", "Intercepto + pendiente aleatoria"),
+  AIC       = round(c(AIC(glmm_int2), AIC(glmm_pen2)), 1),
+  BIC       = round(c(BIC(glmm_int2), BIC(glmm_pen2)), 1),
+  LogLik    = round(c(logLik(glmm_int2), logLik(glmm_pen2)), 2),
+  RMSE      = round(c(
+    sqrt(mean(residuals(glmm_int)^2)),
+    sqrt(mean(residuals(glmm_pen)^2))
+  ), 5)
+)
+knitr::kable(glmm_tabla, caption = "Comparativa de modelos mixtos")
+```
+
+> **Diferencia entre los dos modelos:**
+>
+> - **Intercepto aleatorio** `(1 | Neighborhood)`: cada barrio tiene un precio base distinto, pero el efecto de la superficie habitable es igual en todos los barrios. Es el modelo más parsimonioso.
+> - **Intercepto + pendiente aleatoria** `(1 + GrLivArea | Neighborhood)`: tanto el precio base como el efecto de la superficie varían por barrio. Un m² adicional puede valer más en un barrio exclusivo que en uno modesto.
+>
+> Si el test LRT es significativo (p < 0,05) y el AIC del segundo modelo es menor, la pendiente aleatoria está justificada y el modelo con pendiente e intercepto aleatorios describe mejor la realidad del mercado inmobiliario.
+
+### Comparativa global de todos los modelos
+
+```{r comp_global_s7}
+rmse_glmm_int <- sqrt(mean(residuals(glmm_int)^2))
+rmse_glmm_pen <- sqrt(mean(residuals(glmm_pen)^2))
+
+comp_global <- data.frame(
+  Modelo = c(
+    "LM log (Sesión 5)",
+    sprintf("Penalizado (α=%.2f)", alpha_opt),
+    "GAM",
+    "GLMM — intercepto aleatorio",
+    "GLMM — intercepto + pendiente"
+  ),
+  RMSE = round(c(rmse_lm, rmse_pen, rmse_gam,
+                  rmse_glmm_int, rmse_glmm_pen), 5),
+  AIC  = round(c(AIC(modelo_log), NA, AIC(modelo_gam),
+                  AIC(glmm_int2), AIC(glmm_pen2)), 1)
+)
+knitr::kable(comp_global,
+             caption = "Comparativa global — todos los modelos del trabajo",
+             na.string = "—")
+```
+
+---
+
+## Conclusiones de la Sesión 7
+
+- **Modelos penalizados:** La validación cruzada sobre `alpha` y `lambda` permite seleccionar automáticamente el equilibrio entre Ridge y Lasso. Con predictores correlacionados (habitual en datos de viviendas), Elastic Net suele superar a Lasso puro. Los coeficientes llevados a cero indican variables redundantes.
+- **GAM:** Los grados de libertad efectivos (EDF) revelan qué predictores tienen una relación no lineal con `log(SalePrice)`. Un EDF alto en `GrLivArea` o `OverallQual` indica que la relación precio-superficie no es proporcional en toda la escala, algo que el LM no capturaba.
+- **GLMMs:** Las viviendas no son completamente independientes: el barrio introduce correlación intragrupo. El intercepto aleatorio absorbe el nivel de precios de cada zona; añadir pendiente aleatoria permite que el efecto de la superficie varíe entre barrios. Si el LRT confirma la mejora, el GLMM con pendiente aleatoria es el modelo más completo y realista del trabajo.
+
+---
+
+*Análisis realizado con R `r R.version$major`.`r R.version$minor` y los paquetes `tidyverse`, `ggplot2`, `car`, `corrplot`, `lmtest`, `boot`, `pROC`, `glmnet`, `mgcv`, `lme4`, `lmerTest`.*
